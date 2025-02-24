@@ -3,13 +3,13 @@ import re
 import aiohttp
 from datetime import timedelta
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.components.update import UpdateEntity
+from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers import device_registry as dr
 from hatasmota.models import TasmotaDeviceConfig
 from hatasmota.mqtt import TasmotaMQTTClient
-from hatasmota.const import CONF_NAME, CONF_SW_VERSION, CONF_MAC
+from hatasmota.const import CONF_NAME, CONF_MAC
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -86,8 +86,12 @@ class TasmotaUpdateCoordinator(DataUpdateCoordinator):
     def release_url(self) -> str | None:
         return f"https://github.com/arendst/Tasmota/releases/tag/v{self.latest_version}" if self.latest_version else None
 
+
 class TasmotaUpdateEntity(UpdateEntity):
     """Representation of a Tasmota update entity."""
+
+    _attr_supported_features = UpdateEntityFeature.INSTALL
+
     def __init__(self, coordinator: TasmotaUpdateCoordinator, device, mqtt_client: TasmotaMQTTClient, config: TasmotaDeviceConfig, sw_version):
         self.coordinator = coordinator
         self.device = device
@@ -108,6 +112,10 @@ class TasmotaUpdateEntity(UpdateEntity):
     @property
     def release_url(self) -> str | None:
         return self.coordinator.release_url
+
+    @property
+    def update_description(self) -> str:
+        return self._attr_update_description
 
     async def async_update(self):
         await self.coordinator.async_request_refresh()
