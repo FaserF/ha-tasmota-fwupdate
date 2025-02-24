@@ -2,6 +2,7 @@ import logging
 import re
 import aiohttp
 from datetime import timedelta
+from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.core import HomeAssistant
@@ -94,32 +95,38 @@ class TasmotaUpdateEntity(UpdateEntity):
 
     def __init__(self, coordinator: TasmotaUpdateCoordinator, device, mqtt_client: TasmotaMQTTClient, config: TasmotaDeviceConfig, sw_version):
         self.coordinator = coordinator
+        self.config = config
         self.device = device
         self._mqtt_client = mqtt_client
-        self.config = config
         self._attr_name = f"{config[CONF_NAME]} Firmware Update"
         self._attr_unique_id = f"{config[CONF_MAC]}_firmware_update"
         self._sw_version = sw_version
 
     @property
     def installed_version(self):
+        """Installed firmware version."""
         return self._sw_version
 
     @property
     def latest_version(self):
-        return self.coordinator.data
+        """Latest available version."""
+        return self.coordinator.latest_version
 
     @property
     def release_url(self) -> str | None:
+        """URL to release notes."""
         return self.coordinator.release_url
 
     @property
     def update_description(self) -> str:
-        return self._attr_update_description
+        """Warning for the update."""
+        return "Warning: Please be cautious when updating firmware while using a not default bin image. Make sure your device is connected and powered properly before proceeding."
 
     async def async_update(self):
+        """Fetch latest data."""
         await self.coordinator.async_request_refresh()
 
-    async def async_install(self, version: str = None, backup: bool = False, **kwargs):
+    async def async_install(self, version: str = None, backup: bool = False, **kwargs: Any) -> None:
+        """Trigger the firmware upgrade."""
         _LOGGER.info("Triggering firmware upgrade for %s", self._attr_name)
         await self._mqtt_client.publish(f"cmnd/{self.config[CONF_MAC]}/Upgrade", "1", 0, False)
