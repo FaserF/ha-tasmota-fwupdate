@@ -1,43 +1,117 @@
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-import aiohttp
 import logging
+import re
+import aiohttp
 from datetime import timedelta
-from .const import DOMAIN
-from .update_entity import TasmotaUpdateEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.update import UpdateEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers import device_registry as dr
+from hatasmota.models import TasmotaDeviceConfig
+from hatasmota.mqtt import TasmotaMQTTClient
+from hatasmota.const import CONF_NAME, CONF_SW_VERSION, CONF_MAC
 
 _LOGGER = logging.getLogger(__name__)
 
-async def install_firmware_update(tasmota_mqtt, topic):
-    """Trigger the firmware update via MQTT."""
-    await tasmota_mqtt.publish(f"{topic}/cmnd/Upgrade", "1")
+GITHUB_API_URL = "https://api.github.com/repos/arendst/Tasmota/releases/latest"
 
-async def get_installed_version(config_entry):
-    """Fetch the installed firmware version from the config entry."""
-    return config_entry.data.get("sw_version", "Unknown")
+async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
+    """Set up Tasmota update entities."""
+    _LOGGER.debug("Setting up Tasmota update entities")
+    coordinator = TasmotaUpdateCoordinator(hass)
+    await coordinator.async_config_entry_first_refresh()
 
-async def get_latest_version():
-    """Fetch the latest firmware version from GitHub."""
-    url = "https://api.github.com/repos/arendst/Tasmota/releases/latest"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                data = await response.json()
-                return data["tag_name"].lstrip("v")
-    except Exception as err:
-        _LOGGER.error(f"Error fetching the latest firmware: {err}")
-        return None
+    device_registry = dr.async_get(hass)
+    devices = dr.async_entries_for_config_entry(device_registry, config_entry.entry_id)
+    _LOGGER.debug("Found devices: %s", devices)
+    if not devices:
+        _LOGGER.warning("No devices found for config_entry: %s", config_entry.entry_id)
 
-async def async_update_firmware_info(tasmota_mqtt, config_entry):
-    """Update the firmware info from the Tasmota device."""
-    current_version = await get_installed_version(config_entry)
-    latest_version = await get_latest_version()
-    
-    if current_version and latest_version:
-        return TasmotaUpdateEntity(
-            name="Tasmota Firmware Update",
-            installed_version=current_version,
-            latest_version=latest_version,
-            tasmota_mqtt=tasmota_mqtt,
+    async def _publish(topic: str, payload: str, qos: int | None, retain: bool | None) -> None:
+        await hass.components.mqtt.async_publish(topic, payload, qos, retain)
+
+    async def _subscribe_topics(sub_state: dict | None, topics: dict) -> dict:
+        sub_state = await hass.components.mqtt.async_subscribe(topics)
+        return sub_state
+
+    async def _unsubscribe_topics(sub_state: dict | None) -> dict:
+        return await hass.components.mqtt.async_unsubscribe(sub_state)
+
+    mqtt_client = TasmotaMQTTClient(_publish, _subscribe_topics, _unsubscribe_topics)
+
+    entities = []
+    for device in devices:
+        mac = next((conn[1] for conn in device.connections if conn[0] == "mac"), None)
+        version = device.sw_version
+        config = TasmotaDeviceConfig(
+            name=device.name,
+            sw_version=version,
+            mac=mac,
         )
-    return None
+
+        entities.append(TasmotaUpdateEntity(coordinator, device, mqtt_client, config, version))
+
+    if entities:
+        _LOGGER.debug("Adding firmware entities: %s", entities)
+        async_add_entities(entities)
+    else:
+        _LOGGER.warning("No entities to add")
+
+
+class TasmotaUpdateCoordinator(DataUpdateCoordinator):
+    """Class to manage fetching Tasmota update data."""
+    def __init__(self, hass: HomeAssistant):
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="Tasmota update",
+            update_interval=timedelta(hours=12),
+        )
+        self.latest_version = None
+
+    def _normalize_version(self, version: str) -> str:
+        match = re.search(r"(\d+\.\d+\.\d+)", version)
+        return match.group(1) if match else None
+
+    async def _async_update_data(self):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(GITHUB_API_URL) as response:
+                if response.status != 200:
+                    raise UpdateFailed(f"Error fetching data: {response.status}")
+                data = await response.json()
+                self.latest_version = self._normalize_version(data["tag_name"])
+                return self.latest_version
+
+    @property
+    def release_url(self) -> str | None:
+        return f"https://github.com/arendst/Tasmota/releases/tag/v{self.latest_version}" if self.latest_version else None
+
+class TasmotaUpdateEntity(UpdateEntity):
+    """Representation of a Tasmota update entity."""
+    def __init__(self, coordinator: TasmotaUpdateCoordinator, device, mqtt_client: TasmotaMQTTClient, config: TasmotaDeviceConfig, sw_version):
+        self.coordinator = coordinator
+        self.device = device
+        self._mqtt_client = mqtt_client
+        self.config = config
+        self._attr_name = f"{config[CONF_NAME]} Firmware Update"
+        self._attr_unique_id = f"{config[CONF_MAC]}_firmware_update"
+        self._sw_version = sw_version
+
+    @property
+    def installed_version(self):
+        return self._sw_version
+
+    @property
+    def latest_version(self):
+        return self.coordinator.data
+
+    @property
+    def release_url(self) -> str | None:
+        return self.coordinator.release_url
+
+    async def async_update(self):
+        await self.coordinator.async_request_refresh()
+
+    async def async_install(self, version: str = None, backup: bool = False, **kwargs):
+        _LOGGER.info("Triggering firmware upgrade for %s", self._attr_name)
+        await self._mqtt_client.publish(f"cmnd/{self.config[CONF_MAC]}/Upgrade", "1", 0, False)

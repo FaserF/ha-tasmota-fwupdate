@@ -1,2 +1,2 @@
 # ha-tasmota-fwupdate
- Clone of the official HA tasmota integration with extended firmware update functionality
+ Clone of the official HA tasmota integration with extended firmware update functionality. You will need to disable the original Tasmota integration first! Otherwise errors about diplicates will occure. 

@@ -26,10 +26,6 @@ async def async_remove_automations(hass: HomeAssistant, device_id: str) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
     """Set up Tasmota device automation dynamically through discovery."""
-    
-    # Ensure DATA_UNSUB is initialized
-    if DATA_UNSUB not in hass.data:
-        hass.data[DATA_UNSUB] = []
 
     async def async_device_removed(
         event: Event[EventDeviceRegistryUpdatedData],
