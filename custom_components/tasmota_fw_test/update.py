@@ -4,17 +4,25 @@ import aiohttp
 from datetime import timedelta
 from typing import Any
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
+from homeassistant.components.update import UpdateEntity, UpdateEntityFeature, UpdateEntityDescription
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers import device_registry as dr
+from homeassistant.components import mqtt
 from hatasmota.models import TasmotaDeviceConfig
 from hatasmota.mqtt import TasmotaMQTTClient
 from hatasmota.const import CONF_NAME, CONF_MAC
+from dataclasses import dataclass
 
 _LOGGER = logging.getLogger(__name__)
 
 GITHUB_API_URL = "https://api.github.com/repos/arendst/Tasmota/releases/latest"
+
+@dataclass(frozen=True, kw_only=True)
+class TasmotaUpdateEntityDescription(UpdateEntityDescription):
+    """Update description / warning."""
+    update_description: str
+
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     """Set up Tasmota update entities."""
@@ -29,7 +37,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
         _LOGGER.warning("No devices found for config_entry: %s", config_entry.entry_id)
 
     async def _publish(topic: str, payload: str, qos: int | None, retain: bool | None) -> None:
-        await hass.components.mqtt.async_publish(topic, payload, qos, retain)
+        await mqtt.async_publish(hass, topic, payload, qos, retain)
 
     async def _subscribe_topics(sub_state: dict | None, topics: dict) -> dict:
         sub_state = await hass.components.mqtt.async_subscribe(topics)
@@ -79,9 +87,15 @@ class TasmotaUpdateCoordinator(DataUpdateCoordinator):
             async with session.get(GITHUB_API_URL) as response:
                 if response.status != 200:
                     raise UpdateFailed(f"Error fetching data: {response.status}")
-                data = await response.json()
-                self.latest_version = self._normalize_version(data["tag_name"])
-                return self.latest_version
+                try:
+                    data = await response.json()
+                    if not isinstance(data, dict) or "tag_name" not in data:
+                        raise UpdateFailed(f"Unexpected response format: {data}")
+
+                    self.latest_version = self._normalize_version(data["tag_name"])
+                    return self.latest_version
+                except Exception as e:
+                    raise UpdateFailed(f"Error parsing data: {e}")
 
     @property
     def release_url(self) -> str | None:
@@ -101,26 +115,34 @@ class TasmotaUpdateEntity(UpdateEntity):
         self._attr_name = f"{config[CONF_NAME]} Firmware Update"
         self._attr_unique_id = f"{config[CONF_MAC]}_firmware_update"
         self._sw_version = sw_version
+        self._attr_in_progress = False
+        self.topic = f"tasmota_{self.config[CONF_MAC].replace(':', '')[-6:].upper()}"
+
+        self.entity_description = TasmotaUpdateEntityDescription(
+            key="update",
+            name=self._attr_name,
+            update_description="Warning: Please be cautious when updating firmware while using a non-default bin image. Make sure your device is connected and powered properly before proceeding. Default OtaUrl will be used."
+        )
 
     @property
     def installed_version(self):
-        """Installed firmware version."""
+        """Currently installed Tasmota Firmware."""
         return self._sw_version
 
     @property
     def latest_version(self):
-        """Latest available version."""
+        """Latest version available for install."""
         return self.coordinator.latest_version
 
     @property
     def release_url(self) -> str | None:
-        """URL to release notes."""
+        """URL to GitHub release notes."""
         return self.coordinator.release_url
 
     @property
     def update_description(self) -> str:
-        """Warning for the update."""
-        return "Warning: Please be cautious when updating firmware while using a not default bin image. Make sure your device is connected and powered properly before proceeding."
+        """Warnung for the Update."""
+        return self.entity_description.update_description
 
     async def async_update(self):
         """Fetch latest data."""
@@ -128,5 +150,12 @@ class TasmotaUpdateEntity(UpdateEntity):
 
     async def async_install(self, version: str = None, backup: bool = False, **kwargs: Any) -> None:
         """Trigger the firmware upgrade."""
-        _LOGGER.info("Triggering firmware upgrade for %s", self._attr_name)
-        await self._mqtt_client.publish(f"cmnd/{self.config[CONF_MAC]}/Upgrade", "1", 0, False)
+        _LOGGER.info("Triggering firmware upgrade for %s with topic %s", self._attr_name, self.topic)
+        self._attr_in_progress = True
+
+        try:
+            response = await self._mqtt_client.publish(f"cmnd/{self.topic}/Upgrade", "1", 0, False)
+            _LOGGER.debug("MQTT publish response: %s", response)
+        except Exception as e:
+            self._attr_in_progress = False
+            _LOGGER.error(f"Failed to send MQTT upgrade command: {e}")
